@@ -11,6 +11,7 @@ from app.api.recovery import router as recovery_router
 from app.api.analytics import router as analytics_router
 from app.api.audit import router as audit_router
 from app.api.evaluation import router as evaluation_router
+from app.models.recovery_event import RecoveryEvent
 
 
 Base.metadata.create_all(bind=engine)

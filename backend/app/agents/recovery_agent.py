@@ -1,18 +1,20 @@
-import json
-
-from google import genai
-from google.genai import types
-from dotenv import load_dotenv
 import os
 
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+
 from app.agents.guardrails import validate_recovery_action
-from app.services.audit_service import record_action
 from app.agents.tools.payment_tools import (
     retry_payment,
     create_payment_link,
     send_notification,
 )
 
+
+# =========================================================
+# ENVIRONMENT
+# =========================================================
 
 load_dotenv()
 
@@ -23,22 +25,26 @@ if not GEMINI_API_KEY:
         "GEMINI_API_KEY is not configured."
     )
 
+
+# =========================================================
+# GEMINI CLIENT
+# =========================================================
+
 client = genai.Client(
     api_key=GEMINI_API_KEY
 )
 
-
 MODEL_NAME = "gemini-2.5-flash"
 
 
-# ---------------------------------------------------------
-# TOOL DEFINITIONS
-# ---------------------------------------------------------
+# =========================================================
+# FUNCTION DECLARATIONS
+# =========================================================
 
 retry_payment_tool = types.FunctionDeclaration(
     name="retry_payment",
     description=(
-        "Schedule a retry attempt for a failed payment."
+        "Schedule exactly one retry attempt for a failed payment."
     ),
     parameters=types.Schema(
         type="OBJECT",
@@ -56,7 +62,8 @@ retry_payment_tool = types.FunctionDeclaration(
 create_payment_link_tool = types.FunctionDeclaration(
     name="create_payment_link",
     description=(
-        "Create a payment link for a failed payment."
+        "Create a payment link for a failed payment "
+        "so the customer can complete the payment manually."
     ),
     parameters=types.Schema(
         type="OBJECT",
@@ -81,7 +88,8 @@ create_payment_link_tool = types.FunctionDeclaration(
 send_notification_tool = types.FunctionDeclaration(
     name="send_notification",
     description=(
-        "Send a recovery notification to a customer."
+        "Send a recovery notification to the customer "
+        "about the failed payment."
     ),
     parameters=types.Schema(
         type="OBJECT",
@@ -92,7 +100,7 @@ send_notification_tool = types.FunctionDeclaration(
             ),
             "message": types.Schema(
                 type="STRING",
-                description="Notification message."
+                description="Message to send to the customer."
             ),
         },
         required=[
@@ -112,18 +120,21 @@ TOOLS = types.Tool(
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # TOOL EXECUTION
-# ---------------------------------------------------------
+# =========================================================
 
 def execute_selected_tool(
     tool_name: str,
     arguments: dict,
     opportunity: dict,
-):
+) -> dict:
     """
-    Execute a Gemini-selected tool only after
-    deterministic safety validation.
+    Execute a recovery tool only after passing
+    deterministic RecoverAI guardrails.
+
+    IMPORTANT:
+    This function is called by our backend, not by Gemini.
     """
 
     payment_id = opportunity["payment_id"]
@@ -131,7 +142,10 @@ def execute_selected_tool(
     retry_count = opportunity["retry_count"]
     priority = opportunity["opportunity_priority"]
 
-    # Map Gemini's action to our internal action names
+    # -----------------------------------------------------
+    # Map Gemini tool name -> internal action
+    # -----------------------------------------------------
+
     action_map = {
         "retry_payment": "RETRY_PAYMENT",
         "create_payment_link": "SEND_PAYMENT_LINK",
@@ -143,11 +157,12 @@ def execute_selected_tool(
     if action is None:
         return {
             "success": False,
-            "error": "Unknown tool requested.",
+            "blocked": True,
+            "error": f"Unknown recovery tool: {tool_name}",
         }
 
     # -----------------------------------------------------
-    # SAFETY CHECK
+    # SAFETY / GUARDRAIL CHECK
     # -----------------------------------------------------
 
     allowed, reason = validate_recovery_action(
@@ -166,31 +181,42 @@ def execute_selected_tool(
         }
 
     # -----------------------------------------------------
-    # EXECUTE TOOL
+    # EXECUTE THE APPROVED TOOL
     # -----------------------------------------------------
 
     try:
 
         if tool_name == "retry_payment":
+
             return retry_payment(
                 payment_id=payment_id
             )
 
         if tool_name == "create_payment_link":
+
             return create_payment_link(
                 payment_id=payment_id,
                 amount=amount,
             )
 
         if tool_name == "send_notification":
+
+            message = arguments.get(
+                "message",
+                (
+                    "Your payment requires attention. "
+                    "Please complete your payment."
+                ),
+            )
+
             return send_notification(
                 customer_id=opportunity["customer_id"],
-                message=arguments["message"],
+                message=message,
             )
 
         return {
             "success": False,
-            "error": "Unsupported tool.",
+            "error": "Unsupported recovery tool.",
         }
 
     except Exception as exc:
@@ -201,33 +227,57 @@ def execute_selected_tool(
         }
 
 
-# ---------------------------------------------------------
-# AI DECISION
-# ---------------------------------------------------------
+# =========================================================
+# AI ANALYSIS ONLY
+# =========================================================
 
 def analyze_opportunity(
     opportunity: dict,
-    db,
 ) -> dict:
+    """
+    Ask Gemini to select ONE recovery action.
+
+    IMPORTANT:
+    This function ONLY asks Gemini for a decision.
+    It does NOT execute the recovery tool.
+    """
 
     prompt = f"""
-You are RecoverAI, an AI revenue recovery agent.
+You are RecoverAI, an AI revenue recovery decision engine.
 
-Analyze the failed payment below and choose the SINGLE
-most appropriate recovery tool.
+Your task is to select exactly ONE recovery function
+from the available functions.
 
-IMPORTANT RULES:
-1. Use only the supplied information.
-2. Never claim that money has already been recovered.
-3. Prefer retry_payment for an initial recoverable failure.
-4. Prefer create_payment_link when retries are exhausted
-   or a direct payment request is more appropriate.
-5. Use send_notification when communicating with the customer
-   is the best first step.
-6. Do not attempt multiple tools.
-7. Your job is to make ONE action decision.
+YOU MUST RETURN A FUNCTION CALL.
 
-PAYMENT DATA
+Do NOT return normal text.
+Do NOT write:
+"Recovery Action: retry_payment"
+Do NOT explain the answer in plain text.
+
+Use exactly ONE of these functions:
+
+- retry_payment
+- create_payment_link
+- send_notification
+
+Decision rules:
+
+1. Use retry_payment when the payment appears
+   recoverable and retry_count is below 2.
+
+2. Use create_payment_link when repeated retry attempts
+   are no longer appropriate.
+
+3. Use send_notification when customer communication
+   should happen before another recovery action.
+
+4. Use only the supplied payment information.
+
+5. Do not claim that money has been recovered.
+
+PAYMENT INFORMATION
+-------------------
 
 Payment ID:
 {opportunity["payment_id"]}
@@ -269,73 +319,63 @@ Deterministic Recommended Action:
 {opportunity["recommended_action"]}
 """
 
+    # -----------------------------------------------------
+    # Force Gemini to return a function call
+    # -----------------------------------------------------
+
     response = client.models.generate_content(
         model=MODEL_NAME,
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[TOOLS],
+
+            tool_config=types.ToolConfig(
+                function_calling_config=(
+                    types.FunctionCallingConfig(
+                        mode="ANY",
+                        allowed_function_names=[
+                            "retry_payment",
+                            "create_payment_link",
+                            "send_notification",
+                        ],
+                    )
+                )
+            ),
+
+            # IMPORTANT:
+            # Our application executes the function.
+            # The SDK must NOT execute it automatically.
+            automatic_function_calling=(
+                types.AutomaticFunctionCallingConfig(
+                    disable=True
+                )
+            ),
         ),
     )
 
-    candidate = response.candidates[0]
-
-    tool_call = None
-
-    for part in candidate.content.parts:
-        if part.function_call:
-            tool_call = part.function_call
-            break
-
     # -----------------------------------------------------
-    # Gemini returned a normal text response instead of tool
+    # Safely inspect the function calls
     # -----------------------------------------------------
 
-    if tool_call is None:
+    function_calls = response.function_calls
+
+    if not function_calls:
+
         return {
             "payment_id": opportunity["payment_id"],
             "customer_id": opportunity["customer_id"],
             "decision": "NO_TOOL_SELECTED",
             "ai_response": response.text,
+            "status": "FAILED_TO_SELECT_TOOL",
         }
 
-    tool_name = tool_call.name
-
-    arguments = dict(tool_call.args)
-
-    # -----------------------------------------------------
-    # Safety validation + execution
-    # -----------------------------------------------------
-
-    tool_result = execute_selected_tool(
-        tool_name=tool_name,
-        arguments=arguments,
-        opportunity=opportunity,
-    )
-
-    record_action(
-    db=db,
-    payment_id=opportunity["payment_id"],
-    action=tool_name,
-    status=(
-        "BLOCKED"
-        if tool_result.get("blocked")
-        else (
-            "SUCCESS"
-            if tool_result.get("success")
-            else "FAILED"
-        )
-    ),
-    reason=tool_result.get(
-        "reason",
-        "Recovery tool executed."
-    ),
-    details=tool_result,
-)
+    # We asked for exactly one function.
+    tool_call = function_calls[0]
 
     return {
-    "payment_id": opportunity["payment_id"],
-    "customer_id": opportunity["customer_id"],
-    "decision": tool_name,
-    "arguments": arguments,
-    "tool_result": tool_result,
-}
+        "payment_id": opportunity["payment_id"],
+        "customer_id": opportunity["customer_id"],
+        "decision": tool_call.name,
+        "arguments": dict(tool_call.args),
+        "status": "AWAITING_APPROVAL",
+    }

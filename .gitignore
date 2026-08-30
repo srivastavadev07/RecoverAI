@@ -1,6 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
+*.pyc
 *$py.class
 
 # C extensions
@@ -11,6 +12,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+node_modules/
 downloads/
 eggs/
 .eggs/
@@ -49,6 +51,7 @@ coverage.xml
 *.py.cover
 .hypothesis/
 .pytest_cache/
+.ruff_cache/
 cover/
 
 # Translations
@@ -57,6 +60,7 @@ cover/
 
 # Django stuff:
 *.log
+*.db
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -150,9 +154,9 @@ activemq-data/
 # Environments
 .env
 .envrc
-.venv
-env/
+.venv/
 venv/
+env/
 ENV/
 env.bak/
 venv.bak/
