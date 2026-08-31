@@ -20,15 +20,31 @@ class RecoveryEvent(Base):
         index=True,
     )
 
-    action = Column(String, nullable=False)
+    action = Column(
+        String,
+        nullable=False,
+    )
 
-    amount = Column(Float, nullable=False)
+    amount = Column(
+        Float,
+        nullable=False,
+    )
 
-    status = Column(String, nullable=False)
+    status = Column(
+        String,
+        nullable=False,
+    )
 
     recovered_amount = Column(
         Float,
         default=0,
+    )
+
+    external_event_id = Column(
+        String,
+        nullable=True,
+        unique=True,
+        index=True,
     )
 
     created_at = Column(

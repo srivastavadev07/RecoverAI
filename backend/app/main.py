@@ -12,7 +12,10 @@ from app.api.analytics import router as analytics_router
 from app.api.audit import router as audit_router
 from app.api.evaluation import router as evaluation_router
 from app.models.recovery_event import RecoveryEvent
-
+from app.api.razorpay import (
+    router as razorpay_router,
+)
+from app.api.webhooks import router as webhooks_router
 
 Base.metadata.create_all(bind=engine)
 
@@ -41,7 +44,12 @@ app.include_router(recovery_router)
 app.include_router(analytics_router)
 app.include_router(audit_router)
 app.include_router(evaluation_router)
-
+app.include_router(
+    razorpay_router
+)
+app.include_router(
+    webhooks_router
+)
 
 @app.get("/")
 def root():
