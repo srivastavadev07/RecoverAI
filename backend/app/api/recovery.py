@@ -24,8 +24,16 @@ from app.agents.recovery_agent import (
     execute_selected_tool,
 )
 
+from app.agents.guardrails import (
+    validate_recovery_action,
+)
+
 from app.services.audit_service import (
     record_action,
+)
+
+from app.services.razorpay_service import (
+    create_payment_link as create_razorpay_payment_link,
 )
 
 
@@ -380,7 +388,7 @@ def execute_recovery(
         ↓
     Guardrails
         ↓
-    Tool execution
+    Recovery tool / Razorpay
         ↓
     Persist recovery event
         ↓
@@ -419,7 +427,7 @@ def execute_recovery(
         }
 
     # -----------------------------------------------------
-    # Prevent duplicate recovery after successful payment
+    # Prevent duplicate recovery after payment is recovered
     # -----------------------------------------------------
 
     if payment.recovered == 1:
@@ -450,11 +458,9 @@ def execute_recovery(
             "error": "Customer not found",
         }
 
-    # -----------------------------------------------------
-    # Recalculate risk on backend
-    #
-    # Never trust frontend-calculated values.
-    # -----------------------------------------------------
+    # =====================================================
+    # RECALCULATE RISK
+    # =====================================================
 
     result = calculate_risk_score(
         amount=payment.amount,
@@ -471,9 +477,9 @@ def execute_recovery(
         ),
     )
 
-    # -----------------------------------------------------
-    # Calculate opportunity score
-    # -----------------------------------------------------
+    # =====================================================
+    # CALCULATE OPPORTUNITY SCORE
+    # =====================================================
 
     opportunity_score = (
         calculate_opportunity_score(
@@ -494,9 +500,9 @@ def execute_recovery(
         )
     )
 
-    # -----------------------------------------------------
-    # Trusted opportunity object
-    # -----------------------------------------------------
+    # =====================================================
+    # TRUSTED OPPORTUNITY OBJECT
+    # =====================================================
 
     opportunity = {
         "payment_id": payment.id,
@@ -569,14 +575,98 @@ def execute_recovery(
         }
 
     # =====================================================
-    # EXECUTE THROUGH GUARDRAILS
+    # EXECUTE RECOVERY ACTION
     # =====================================================
 
-    tool_result = execute_selected_tool(
-        tool_name=request.action,
-        arguments=arguments,
-        opportunity=opportunity,
-    )
+    # -----------------------------------------------------
+    # RAZORPAY PAYMENT LINK
+    # -----------------------------------------------------
+
+    if request.action == "create_payment_link":
+
+        # -------------------------------------------------
+        # Guardrail FIRST
+        # -------------------------------------------------
+
+        allowed, reason = validate_recovery_action(
+            action="SEND_PAYMENT_LINK",
+            amount=payment.amount,
+            retry_count=payment.retry_count,
+            opportunity_priority=(
+                opportunity_priority
+            ),
+        )
+
+        if not allowed:
+
+            tool_result = {
+                "success": False,
+                "blocked": True,
+                "tool": "create_payment_link",
+                "reason": reason,
+            }
+
+        else:
+
+            try:
+
+                # -----------------------------------------
+                # Create actual Razorpay Test Mode link
+                # -----------------------------------------
+
+                razorpay_result = (
+                    create_razorpay_payment_link(
+                        amount=payment.amount,
+                        customer_id=(
+                            payment.customer_id
+                        ),
+                        payment_id=payment.id,
+                    )
+                )
+
+                tool_result = {
+                    "success": True,
+                    "tool": "create_payment_link",
+                    "provider": "razorpay",
+                    "payment_id": payment.id,
+
+                    "razorpay_payment_link_id": (
+                        razorpay_result.get("id")
+                    ),
+
+                    "payment_link": (
+                        razorpay_result.get(
+                            "short_url"
+                        )
+                    ),
+
+                    "status": (
+                        razorpay_result.get(
+                            "status"
+                        )
+                    ),
+                }
+
+            except Exception as exc:
+
+                tool_result = {
+                    "success": False,
+                    "tool": "create_payment_link",
+                    "provider": "razorpay",
+                    "error": str(exc),
+                }
+
+    # -----------------------------------------------------
+    # OTHER RECOVERY TOOLS
+    # -----------------------------------------------------
+
+    else:
+
+        tool_result = execute_selected_tool(
+            tool_name=request.action,
+            arguments=arguments,
+            opportunity=opportunity,
+        )
 
     # =====================================================
     # DETERMINE EXECUTION STATUS
@@ -600,22 +690,15 @@ def execute_recovery(
 
     # IMPORTANT:
     #
-    # A successful tool execution does NOT automatically
-    # mean that money was recovered.
+    # Creating a payment link is NOT a recovery.
     #
-    # Example:
-    # create_payment_link -> link created
-    # send_notification   -> message queued
+    # The money is considered recovered only when the
+    # Razorpay webhook confirms payment_link.paid.
     #
-    # Neither proves the customer paid.
-    #
-    # We only mark the payment recovered when a tool
-    # explicitly reports:
+    # Therefore this must stay False here unless a tool
+    # explicitly says:
     #
     #     "recovered": True
-    #
-    # This makes the system ready for the future
-    # Razorpay Test Mode payment confirmation/webhook.
 
     payment_recovered = (
         tool_result.get(
@@ -628,29 +711,25 @@ def execute_recovery(
     recovered_amount = 0.0
 
     if payment_recovered:
+
         recovered_amount = payment.amount
 
-        # Mark payment as recovered
         payment.recovered = 1
-
-        # Change payment state
         payment.status = "recovered"
 
     # =====================================================
     # UPDATE RETRY COUNT
     # =====================================================
 
-    # A successful retry action represents a retry attempt
-    # even when payment recovery has not yet been confirmed.
-
     if (
         request.action == "retry_payment"
         and tool_result.get("success")
     ):
+
         payment.retry_count += 1
 
     # =====================================================
-    # CREATE PERSISTENT RECOVERY EVENT
+    # DETERMINE RECOVERY EVENT STATUS
     # =====================================================
 
     if payment_recovered:
@@ -668,6 +747,10 @@ def execute_recovery(
     else:
 
         recovery_event_status = "FAILED"
+
+    # =====================================================
+    # CREATE PERSISTENT RECOVERY EVENT
+    # =====================================================
 
     recovery_event = RecoveryEvent(
         payment_id=payment.id,
