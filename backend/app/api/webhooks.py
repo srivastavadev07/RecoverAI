@@ -91,7 +91,16 @@ async def razorpay_webhook(
     # =====================================================
 
     event_name = payload.get("event")
+    print("RAZORPAY WEBHOOK EVENT:", event_name)
 
+    payment_link_entity = (
+    payload.get("payload", {})
+    .get("payment_link", {})
+    .get("entity", {})
+    )
+
+    print("RAZORPAY REFERENCE ID:", payment_link_entity.get("reference_id"))
+    print("RAZORPAY AMOUNT PAID:", payment_link_entity.get("amount_paid"))
 
     # =====================================================
     # 6. We only process payment_link.paid
