@@ -1,9 +1,9 @@
-
-from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database.database import get_db
 from app.models.payment import Payment
+from fastapi import APIRouter, Depends, HTTPException
+
 
 
 router = APIRouter(
@@ -11,15 +11,19 @@ router = APIRouter(
     tags=["Payments"],
 )
 
+@router.get("/{payment_id}")
+def get_payment(payment_id: int, db: Session = Depends(get_db)):
+    payment = db.query(Payment).filter(Payment.id == payment_id).first()
 
-@router.get("/")
-def get_payments(
-    db: Session = Depends(get_db),
-):
-    payments = (
-        db.query(Payment)
-        .limit(20)
-        .all()
-    )
+    if payment is None:
+        raise HTTPException(status_code=404, detail="Payment not found")
 
-    return payments
+    return {
+        "payment_id": payment.id,
+        "status": payment.status,
+        "recovered": payment.recovered,
+        "amount": payment.amount,
+        "retry_count": payment.retry_count,
+    }
+
+    
