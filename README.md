@@ -129,7 +129,3 @@ RecoverAI helps businesses:
 
 Razorpay AI Buildathon
 
-## License
-
-MIT
-![alt text](image.png)
